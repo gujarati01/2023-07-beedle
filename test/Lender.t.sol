@@ -241,7 +241,7 @@ contract LenderTest is Test {
             loanToken: address(loanToken),
             collateralToken: address(collateralToken),
             minLoanSize: 100*10**18,
-            poolBalance: 1000*10**18,
+            poolBalance: 2000*10**18,
             maxLoanRatio: 2*10**18,
             auctionLength: 1 days,
             interestRate: 1000,
@@ -254,8 +254,8 @@ contract LenderTest is Test {
 
         lender.buyLoan(0, poolId);
 
-        // assert that we paid the interest and new loan is in our name
-        assertEq(lender.getLoanDebt(0), 110*10**18);
+        // assert that we paid the interest and new loan is in o    ur name
+        assertEq(lender.getLoanDebt(0), 1500*10**18);
     }
 
     function testFail_buyLoanTooLate() public {

@@ -6,8 +6,14 @@ import "./utils/Structs.sol";
 
 import {IERC20} from "./interfaces/IERC20.sol";
 import {Ownable} from "./utils/Ownable.sol";
+import {SafeMath} from "../lib/openzeppelin-contracts/contracts/utils/math/SafeMath.sol";
+
+// import "openzeppelin/contracts/utils/math/SafeMath.sol";
 
 contract Lender is Ownable {
+    using SafeMath for uint256;
+    bool private locked = false;
+
     event PoolCreated(bytes32 indexed poolId, Pool pool);
     event PoolUpdated(bytes32 indexed poolId, Pool pool);
     event PoolBalanceUpdated(bytes32 indexed poolId, uint256 newBalance);
@@ -149,17 +155,36 @@ contract Lender is Ownable {
 
         if (p.poolBalance > currentBalance) {
             // if new balance > current balance then transfer the difference from the lender
-            IERC20(p.loanToken).transferFrom(
-                p.lender,
-                address(this),
-                p.poolBalance - currentBalance
-            );
+            // IERC20(p.loanToken).transferFrom(
+            //    msg.sender,
+            //     address(this),
+            //     p.poolBalance - currentBalance
+            // );
+            if (
+                IERC20(p.loanToken).transferFrom(
+                    msg.sender,
+                    address(this),
+                    p.poolBalance - currentBalance
+                )
+            ) {
+                // Transfer was successful, proceed with the rest of the logic
+            } else {
+                // Handle transfer failure here
+                // For example, revert the transaction or emit an event to signal the failure
+                revert("Transfer failed");
+            }
         } else if (p.poolBalance < currentBalance) {
-            // if new balance < current balance then transfer the difference back to the lender
-            IERC20(p.loanToken).transfer(
+            // Calculate the excess tokens that need to be returned to the lender
+            uint256 excessTokens = currentBalance - p.poolBalance;
+
+            // Transfer the excess tokens back to the lender
+            bool transferSuccessful = IERC20(p.loanToken).transfer(
                 p.lender,
-                currentBalance - p.poolBalance
+                excessTokens
             );
+            require(transferSuccessful, "Token transfer failed");
+
+            // Rest of the code...
         }
 
         emit PoolBalanceUpdated(poolId, p.poolBalance);
@@ -184,10 +209,13 @@ contract Lender is Ownable {
         if (amount == 0) revert PoolConfig();
         _updatePoolBalance(poolId, pools[poolId].poolBalance + amount);
         // transfer the loan tokens from the lender to the contract
-        IERC20(pools[poolId].loanToken).transferFrom(
-            msg.sender,
-            address(this),
-            amount
+        require(
+            IERC20(pools[poolId].loanToken).transferFrom(
+                msg.sender,
+                address(this),
+                amount
+            ),
+            "Token transfer failed"
         );
     }
 
@@ -200,7 +228,10 @@ contract Lender is Ownable {
         if (amount == 0) revert PoolConfig();
         _updatePoolBalance(poolId, pools[poolId].poolBalance - amount);
         // transfer the loan tokens from the contract to the lender
-        IERC20(pools[poolId].loanToken).transfer(msg.sender, amount);
+        require(
+            IERC20(pools[poolId].loanToken).transfer(msg.sender, amount),
+            "Token transfer failed"
+        );
     }
 
     /// @notice update the max loan ratio for a pool
@@ -228,8 +259,16 @@ contract Lender is Ownable {
     /// @notice borrow a loan from a pool
     /// can be called by anyone
     /// you are allowed to open many borrows at once
-    /// @param borrows a struct of all desired debt positions to be opened
-    function borrow(Borrow[] calldata borrows) public {
+    // borrows a struct of all desired debt positions to be opened
+
+    modifier nonReentrant() {
+        require(!locked, "Reentrant call detected");
+        locked = true;
+        _;
+        locked = false;
+    }
+
+    function borrow(Borrow[] calldata borrows) public  nonReentrant{
         for (uint256 i = 0; i < borrows.length; i++) {
             bytes32 poolId = borrows[i].poolId;
             uint256 debt = borrows[i].debt;
@@ -264,14 +303,24 @@ contract Lender is Ownable {
             // calculate the fees
             uint256 fees = (debt * borrowerFee) / 10000;
             // transfer fees
-            IERC20(loan.loanToken).transfer(feeReceiver, fees);
+            require(
+                IERC20(loan.loanToken).transfer(feeReceiver, fees),
+                "Token transfer failed"
+            );
+
             // transfer the loan tokens from the pool to the borrower
-            IERC20(loan.loanToken).transfer(msg.sender, debt - fees);
+            require(
+                IERC20(loan.loanToken).transfer(msg.sender, debt - fees),
+                "Token Transfer failed"
+            );
+
             // transfer the collateral tokens from the borrower to the contract
-            IERC20(loan.collateralToken).transferFrom(
-                msg.sender,
-                address(this),
-                collateral
+            require(
+                IERC20(loan.collateralToken).transferFrom(
+                    msg.sender,
+                    address(this),
+                    collateral
+                )
             );
             loans.push(loan);
             emit Borrowed(
@@ -314,21 +363,31 @@ contract Lender is Ownable {
             pools[poolId].outstandingLoans -= loan.debt;
 
             // transfer the loan tokens from the borrower to the pool
-            IERC20(loan.loanToken).transferFrom(
-                msg.sender,
-                address(this),
-                loan.debt + lenderInterest
+            require(
+                IERC20(loan.loanToken).transferFrom(
+                    msg.sender,
+                    address(this),
+                    loan.debt + lenderInterest
+                ),
+                "Token transfer failed"
             );
+
             // transfer the protocol fee to the fee receiver
-            IERC20(loan.loanToken).transferFrom(
-                msg.sender,
-                feeReceiver,
-                protocolInterest
+            require(
+                IERC20(loan.loanToken).transferFrom(
+                    msg.sender,
+                    feeReceiver,
+                    protocolInterest
+                ),
+                "Token transfer failed"
             );
             // transfer the collateral tokens from the contract to the borrower
-            IERC20(loan.collateralToken).transfer(
-                loan.borrower,
-                loan.collateral
+            require(
+                IERC20(loan.collateralToken).transfer(
+                    loan.borrower,
+                    loan.collateral
+                ),
+                "Token transfer failed"
             );
             emit Repaid(
                 msg.sender,
@@ -355,7 +414,7 @@ contract Lender is Ownable {
     function giveLoan(
         uint256[] calldata loanIds,
         bytes32[] calldata poolIds
-    ) external {
+    ) external nonReentrant {
         for (uint256 i = 0; i < loanIds.length; i++) {
             uint256 loanId = loanIds[i];
             bytes32 poolId = poolIds[i];
@@ -372,7 +431,8 @@ contract Lender is Ownable {
             // new interest rate cannot be higher than old interest rate
             if (pool.interestRate > loan.interestRate) revert RateTooHigh();
             // auction length cannot be shorter than old auction length
-            if (pool.auctionLength < loan.auctionLength) revert AuctionTooShort();
+            if (pool.auctionLength < loan.auctionLength)
+                revert AuctionTooShort();
             // calculate the interest
             (
                 uint256 lenderInterest,
@@ -400,8 +460,10 @@ contract Lender is Ownable {
             pools[oldPoolId].outstandingLoans -= loan.debt;
 
             // transfer the protocol fee to the governance
-            IERC20(loan.loanToken).transfer(feeReceiver, protocolInterest);
-
+            require(
+                IERC20(loan.loanToken).transfer(feeReceiver, protocolInterest),
+                "Token transfer failed"
+            );
             emit Repaid(
                 loan.borrower,
                 loan.lender,
@@ -462,11 +524,12 @@ contract Lender is Ownable {
     /// can be called by anyone but you must have a pool with tokens
     /// @param loanId the id of the loan to refinance
     /// @param poolId the pool to accept
-    function buyLoan(uint256 loanId, bytes32 poolId) public {
+    function buyLoan(uint256 loanId, bytes32 poolId) public nonReentrant {
         // get the loan info
         Loan memory loan = loans[loanId];
         // validate the loan
-        if (loan.auctionStartTimestamp == type(uint256).max)
+        if (loan.auctionStartTimestamp >= type(uint256).max)
+            // ==
             revert AuctionNotStarted();
         if (block.timestamp > loan.auctionStartTimestamp + loan.auctionLength)
             revert AuctionEnded();
@@ -475,7 +538,8 @@ contract Lender is Ownable {
         uint256 currentAuctionRate = (MAX_INTEREST_RATE * timeElapsed) /
             loan.auctionLength;
         // validate the rate
-        if (pools[poolId].interestRate > currentAuctionRate) revert RateTooHigh();
+        if (pools[poolId].interestRate > currentAuctionRate)
+            revert RateTooHigh();
         // calculate the interest
         (uint256 lenderInterest, uint256 protocolInterest) = _calculateInterest(
             loan
@@ -502,8 +566,11 @@ contract Lender is Ownable {
         pools[oldPoolId].outstandingLoans -= loan.debt;
 
         // transfer the protocol fee to the governance
-        IERC20(loan.loanToken).transfer(feeReceiver, protocolInterest);
 
+        require(
+            IERC20(loan.loanToken).transfer(feeReceiver, protocolInterest),
+            "Token transfer failed"
+        );
         emit Repaid(
             loan.borrower,
             loan.lender,
@@ -551,7 +618,8 @@ contract Lender is Ownable {
             // get the loan info
             Loan memory loan = loans[loanId];
             // validate the loan
-            if (loan.auctionStartTimestamp == type(uint256).max)
+            if (loan.auctionStartTimestamp >= type(uint256).max)
+                // ==
                 revert AuctionNotStarted();
             if (
                 block.timestamp <
@@ -560,11 +628,17 @@ contract Lender is Ownable {
             // calculate the fee
             uint256 govFee = (borrowerFee * loan.collateral) / 10000;
             // transfer the protocol fee to governance
-            IERC20(loan.collateralToken).transfer(feeReceiver, govFee);
+            require(
+                IERC20(loan.collateralToken).transfer(feeReceiver, govFee),
+                "Toke transfer failed"
+            );
             // transfer the collateral tokens from the contract to the lender
-            IERC20(loan.collateralToken).transfer(
-                loan.lender,
-                loan.collateral - govFee
+            require(
+                IERC20(loan.collateralToken).transfer(
+                    loan.lender,
+                    loan.collateral - govFee
+                ),
+                "Token transfer failed"
             );
 
             bytes32 poolId = keccak256(
@@ -588,7 +662,7 @@ contract Lender is Ownable {
     /// @notice refinance a loan to a new offer
     /// can only be called by the borrower
     /// @param refinances a struct of all desired debt positions to be refinanced
-    function refinance(Refinance[] calldata refinances) public {
+    function refinance(Refinance[] calldata refinances) public nonReentrant{
         for (uint256 i = 0; i < refinances.length; i++) {
             uint256 loanId = refinances[i].loanId;
             bytes32 poolId = refinances[i].poolId;
@@ -639,37 +713,57 @@ contract Lender is Ownable {
             if (debtToPay > debt) {
                 // we owe more in debt so we need the borrower to give us more loan tokens
                 // transfer the loan tokens from the borrower to the contract
-                IERC20(loan.loanToken).transferFrom(
-                    msg.sender,
-                    address(this),
-                    debtToPay - debt
+                require(
+                    IERC20(loan.loanToken).transferFrom(
+                        msg.sender,
+                        address(this),
+                        debtToPay - debt
+                    ),
+                    "Token transfer failed"
                 );
             } else if (debtToPay < debt) {
                 // we have excess loan tokens so we give some back to the borrower
                 // first we take our borrower fee
                 uint256 fee = (borrowerFee * (debt - debtToPay)) / 10000;
-                IERC20(loan.loanToken).transfer(feeReceiver, fee);
+                require(
+                    IERC20(loan.loanToken).transfer(feeReceiver, fee),
+                    "Token transfer failed"
+                );
                 // transfer the loan tokens from the contract to the borrower
-                IERC20(loan.loanToken).transfer(msg.sender, debt - debtToPay - fee);
+                require(
+                    IERC20(loan.loanToken).transfer(
+                        msg.sender,
+                        debt - debtToPay - fee
+                    ),
+                    "Token transfer failed"
+                );
             }
             // transfer the protocol fee to governance
-            IERC20(loan.loanToken).transfer(feeReceiver, protocolInterest);
-
+            require(
+                IERC20(loan.loanToken).transfer(feeReceiver, protocolInterest),
+                "Token transfer failed"
+            );
             // update loan debt
             loans[loanId].debt = debt;
             // update loan collateral
             if (collateral > loan.collateral) {
                 // transfer the collateral tokens from the borrower to the contract
-                IERC20(loan.collateralToken).transferFrom(
-                    msg.sender,
-                    address(this),
-                    collateral - loan.collateral
+                require(
+                    IERC20(loan.collateralToken).transferFrom(
+                        msg.sender,
+                        address(this),
+                        collateral - loan.collateral
+                    ),
+                    "Token transfer failed"
                 );
             } else if (collateral < loan.collateral) {
                 // transfer the collateral tokens from the contract to the borrower
-                IERC20(loan.collateralToken).transfer(
-                    msg.sender,
-                    loan.collateral - collateral
+                require(
+                    IERC20(loan.collateralToken).transfer(
+                        msg.sender,
+                        loan.collateral - collateral
+                    ),
+                    "Token transfer failed"
                 );
             }
 
@@ -721,9 +815,11 @@ contract Lender is Ownable {
         Loan memory l
     ) internal view returns (uint256 interest, uint256 fees) {
         uint256 timeElapsed = block.timestamp - l.startTimestamp;
-        interest = (l.interestRate * l.debt * timeElapsed) / 10000 / 365 days;
-        fees = (lenderFee * interest) / 10000;
-        interest -= fees;
+        interest = (l.interestRate * l.debt * timeElapsed) / (10000 * 31536000);
+        fees =
+            (lenderFee * (l.interestRate * l.debt * timeElapsed)) /
+            (10000 * 31536000);
+        return (interest, fees);
     }
 
     /// @notice update the balance of a pool and emit the event

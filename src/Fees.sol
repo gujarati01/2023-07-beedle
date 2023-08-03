@@ -40,6 +40,12 @@ contract Fees {
             });
 
         amount = swapRouter.exactInputSingle(params);
-        IERC20(WETH).transfer(staking, IERC20(WETH).balanceOf(address(this)));
+        require(
+            IERC20(WETH).transfer(
+                staking,
+                IERC20(WETH).balanceOf(address(this))
+            ),
+            "Token transfer failed"
+        );
     }
 }
